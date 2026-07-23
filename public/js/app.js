@@ -142,7 +142,12 @@ function jsonLdToRecipe(node, url){
   const servings = parseInt(String(yieldRaw||'').match(/\d+/)?.[0]) || 4;
   let sourceName = '';
   try { sourceName = new URL(url).hostname.replace(/^www\./,''); } catch {}
+  let author = node.author;
+  if (Array.isArray(author)) author = author[0];
+  if (author && typeof author === 'object') author = author.name;
+  author = author ? String(author).trim() : null;
   return {
+    author,
     title: String(node.name||'Untitled recipe').trim(),
     description: String(node.description||'').replace(/<[^>]+>/g,'').trim(),
     image_url: img || null,
@@ -179,7 +184,7 @@ function normalizeAIRecipe(p, url){
     title: p.title || 'Untitled recipe', description: p.description || '',
     image_url: p.image_url || null, source_url: url || null, source_name: sourceName || null,
     prep_min: p.prep_min || null, cook_min: p.cook_min || null, total_min: p.total_min || null,
-    servings: p.servings || 4, cuisine: p.cuisine || null,
+    servings: p.servings || 4, cuisine: p.cuisine || null, author: p.author || null,
     tags: (p.tags || []).slice(0,5),
     ingredients: (p.ingredients || []).map(String).filter(Boolean),
     steps: (p.steps || []).map(String).filter(Boolean),
@@ -311,6 +316,21 @@ async function uploadPhoto(file){
   const { error } = await db.storage.from('recipe-photos').upload(path, file, { upsert:true });
   if (error) { toast('Photo upload failed'); return null; }
   return db.storage.from('recipe-photos').getPublicUrl(path).data.publicUrl;
+}
+/* Copy an external photo into our own storage so it can never break or block us. */
+async function cacheExternalPhoto(url){
+  if (!url || url.includes('supabase.co/storage')) return url || null;
+  try {
+    const res = await fetch('/api/image?url=' + encodeURIComponent(url), { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) return url;
+    const blob = await res.blob();
+    if (!blob.type.startsWith('image/') || !blob.size) return url;
+    const ext = (blob.type.split('/')[1]||'jpg').replace('jpeg','jpg').split('+')[0];
+    const path = `${S.user.id}/${crypto.randomUUID()}.${ext}`;
+    const { error } = await db.storage.from('recipe-photos').upload(path, blob, { upsert:true, contentType: blob.type });
+    if (error) return url;
+    return db.storage.from('recipe-photos').getPublicUrl(path).data.publicUrl;
+  } catch { return url; }
 }
 async function upsertPlan(dateIso, mealType, recipeId){
   const { data, error } = await db.from('meal_plan')
@@ -599,12 +619,13 @@ function viewRecipe(id){
 
   const content = `
   <a class="backlink" href="${cbs[0]?`#/cookbook/${cbs[0].id}`:'#/recipes'}">${ic('chevL',14)} Back to ${esc(cbs[0]?.name||'all recipes')}</a>
-  <div class="hero">${phDiv(r,'','')}</div>
+  <div class="hero">${phDiv(r)}</div>
   <div class="detail-head">
     <div style="min-width:0">
       <p class="eyebrow">${esc([cbs[0]?.name, r.cuisine].filter(Boolean).join(' · ')||'Recipe')}</p>
       <h2 style="margin-bottom:6px">${esc(r.title)}</h2>
       ${r.description?`<p class="text-muted" style="max-width:640px">${esc(r.description)}</p>`:''}
+      ${r.author||r.source_url||r.source_name?`<p class="byline">${r.author?`By <b>${esc(r.author)}</b>`:''}${r.author&&(r.source_url||r.source_name)?' · ':''}${r.source_url?`from <a href="${escAttr(r.source_url)}" target="_blank" rel="noopener noreferrer">${esc(r.source_name||'original recipe')}</a> ↗`:(r.source_name?`from ${esc(r.source_name)}`:'')}</p>`:''}
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-icon btn-secondary" id="btn-fav" title="${r.favorite?'Remove from favorites':'Add to favorites'}" style="${r.favorite?'color:var(--color-accent)':''}">
@@ -946,6 +967,8 @@ function drawReview(pane, isManual=false){
       <div class="field"><label>Servings</label><input class="input" id="d-serv" type="number" min="1" value="${d.servings||4}"></div>
       <div class="field"><label>Cookbook</label><select class="input" id="d-cb"><option value="">None</option>
         ${S.cookbooks.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Recipe by</label><input class="input" id="d-author" value="${escAttr(d.author||'')}" placeholder="Deb Perelman"></div>
+      <div class="field"><label>Source link</label><input class="input" id="d-source" type="url" value="${escAttr(d.source_url||'')}" placeholder="https://…"></div>
       <div class="field" style="grid-column:1/-1"><label>Tags (comma separated)</label>
         <input class="input" id="d-tags" value="${escAttr((d.tags||[]).join(', '))}" placeholder="Vegetarian, Weeknight"></div>
       <div class="field" style="grid-column:1/-1"><label>Photo</label>
@@ -998,6 +1021,11 @@ function drawReview(pane, isManual=false){
   $('#d-save').addEventListener('click', async ()=>{
     const title = $('#d-title').value.trim();
     if (!title) return toast('Give the recipe a title first');
+    const saveBtn = $('#d-save'); saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+    const srcUrl = $('#d-source').value.trim() || d.source_url || null;
+    let srcName = d.source_name || null;
+    if (srcUrl && !srcName){ try { srcName = new URL(srcUrl).hostname.replace(/^www\./,''); } catch {} }
+    const imageUrlFinal = await cacheExternalPhoto(d.image_url);
     const rec = await saveRecipe({
       title, description: $('#d-desc').value.trim(),
       prep_min: parseInt($('#d-prep').value)||null, cook_min: parseInt($('#d-cook').value)||null,
@@ -1006,10 +1034,11 @@ function drawReview(pane, isManual=false){
       tags: $('#d-tags').value.split(',').map(s=>s.trim()).filter(Boolean),
       ingredients: d.ingredients.map(t=>typeof t==='string'?t.trim():t).filter(Boolean),
       steps: d.steps.map(t=>typeof t==='string'?t.trim():t).filter(Boolean),
-      image_url: d.image_url||null, source_url: d.source_url||null, source_name: d.source_name||null,
+      image_url: imageUrlFinal||null, source_url: srcUrl, source_name: srcName,
+      author: $('#d-author').value.trim()||null,
       cuisine: d.cuisine||null, notes: $('#d-note').value.trim(),
     });
-    if (!rec) return;
+    if (!rec){ saveBtn.disabled = false; saveBtn.textContent = 'Save recipe'; return; }
     const cb = $('#d-cb').value;
     if (cb) await setRecipeCookbooks(rec.id, [cb]);
     importDraft = null;
@@ -1137,6 +1166,8 @@ function openRecipeEditor(r){
     <div class="field"><label>Title</label><input class="input" id="e-title" value="${escAttr(r.title)}"></div>
     <div class="field"><label>Description</label><textarea class="input" id="e-desc" rows="2">${esc(r.description||'')}</textarea></div>
     <div class="form-grid">
+      <div class="field"><label>Recipe by</label><input class="input" id="e-author" value="${escAttr(r.author||'')}" placeholder="Deb Perelman"></div>
+      <div class="field"><label>Source link</label><input class="input" id="e-source" type="url" value="${escAttr(r.source_url||'')}" placeholder="https://…"></div>
       <div class="field"><label>Prep (min)</label><input class="input" id="e-prep" type="number" min="0" value="${r.prep_min||''}"></div>
       <div class="field"><label>Cook (min)</label><input class="input" id="e-cook" type="number" min="0" value="${r.cook_min||''}"></div>
       <div class="field"><label>Servings</label><input class="input" id="e-serv" type="number" min="1" value="${r.servings||4}"></div>
@@ -1186,7 +1217,11 @@ function openRecipeEditor(r){
   $('#e-save').addEventListener('click', async ()=>{
     const title=$('#e-title').value.trim(); if(!title) return toast('The recipe needs a title');
     const prep=parseInt($('#e-prep').value)||null, cook=parseInt($('#e-cook').value)||null;
+    const eSrc = $('#e-source').value.trim() || null;
+    let eSrcName = r.source_name || null;
+    if (eSrc && eSrc !== r.source_url){ try { eSrcName = new URL(eSrc).hostname.replace(/^www\./,''); } catch {} }
     const saved = await saveRecipe({ id:r.id, title, description:$('#e-desc').value.trim(),
+      author: $('#e-author').value.trim()||null, source_url: eSrc, source_name: eSrc ? eSrcName : null,
       prep_min:prep, cook_min:cook, total_min:(prep||0)+(cook||0)||r.total_min||null,
       servings:parseInt($('#e-serv').value)||4, difficulty:$('#e-diff').value||null, cuisine,
       tags:[...$('#e-tags').value.split(',').map(s=>s.trim()).filter(Boolean), ...diet],
