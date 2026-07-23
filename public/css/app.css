@@ -213,6 +213,7 @@ button.tag[aria-pressed="true"]{background:var(--color-accent);color:var(--color
 
 /* ═════════ Recipe detail ═════════ */
 .hero{border-radius:calc(var(--radius-lg)*1.15);overflow:hidden;aspect-ratio:21/9;margin-bottom:var(--space-4)}
+.hero .ph{height:100%}
 @media (max-width:640px){.hero{aspect-ratio:4/3;margin-inline:calc(-1*var(--space-4));border-radius:0}}
 .detail-head{display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:flex-start;justify-content:space-between}
 .meta-row{display:flex;flex-wrap:wrap;gap:var(--space-2);margin:var(--space-3) 0 var(--space-4)}
@@ -376,3 +377,9 @@ mark{background:var(--color-accent-200);border-radius:3px;padding:0 1px}
   *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}
   html{scroll-behavior:auto}
 }
+
+/* — byline (author + source) — */
+.byline{font-size:13px;color:var(--color-neutral-700);margin:6px 0 0}
+.byline b{font-weight:600;color:var(--color-text)}
+.byline a{color:var(--color-accent-700);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--color-accent) 40%,transparent)}
+.byline a:hover{color:var(--color-accent-800);border-bottom-color:currentColor}
