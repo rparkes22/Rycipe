@@ -157,11 +157,7 @@ function jsonLdToRecipe(node, url){
     steps,
   };
 }
-async function fetchRecipeFromUrl(url){
-  const prox = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
-  const res = await fetch(prox, { signal: AbortSignal.timeout(20000) });
-  if (!res.ok) throw new Error('Could not reach that page');
-  const html = await res.text();
+function recipeFromHtml(html, url){
   const doc = new DOMParser().parseFromString(html, 'text/html');
   for (const s of doc.querySelectorAll('script[type="application/ld+json"]')){
     try {
@@ -169,7 +165,34 @@ async function fetchRecipeFromUrl(url){
       if (node) return jsonLdToRecipe(node, url);
     } catch {}
   }
-  throw new Error('No recipe data found on that page');
+  return null;
+}
+async function fetchRecipeFromUrl(url, onStatus){
+  // Public CORS proxies come and go, and big recipe publishers block some of
+  // them — so try several routes and take the first that yields recipe data.
+  const enc = encodeURIComponent(url);
+  const routes = [
+    ['corsproxy.io',      `https://corsproxy.io/?url=${enc}`],
+    ['allorigins',        `https://api.allorigins.win/raw?url=${enc}`],
+    ['codetabs',          `https://api.codetabs.com/v1/proxy?quest=${url}`],
+    ['the Internet Archive', `https://web.archive.org/web/2id_/${url}`],
+  ];
+  let sawHtml = false;
+  for (const [name, prox] of routes){
+    onStatus?.(`Fetching via ${name}…`);
+    try {
+      const res = await fetch(prox, { signal: AbortSignal.timeout(14000) });
+      if (!res.ok) continue;
+      const html = await res.text();
+      if (!html || html.length < 500) continue;
+      sawHtml = true;
+      const rec = recipeFromHtml(html, url);
+      if (rec) return rec;
+    } catch {}
+  }
+  throw new Error(sawHtml
+    ? 'That page loaded, but no structured recipe data was found on it'
+    : 'Could not reach that page from the browser — the site may block proxies');
 }
 function parsePastedText(text){
   const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
@@ -844,7 +867,7 @@ function drawImportPane(){
       const url = $('#imp-url').value.trim();
       if (!/^https?:\/\//.test(url)) return $('#imp-status').textContent = 'Enter a full link starting with https://';
       $('#imp-status').textContent = 'Fetching and parsing…'; $('#imp-fetch').disabled = true;
-      try { importDraft = await fetchRecipeFromUrl(url); drawImportPane(); }
+      try { importDraft = await fetchRecipeFromUrl(url, m => { const el = $('#imp-status'); if (el) el.textContent = m; }); drawImportPane(); }
       catch (e){ $('#imp-status').textContent = `${e.message}. You can paste the recipe text instead.`; $('#imp-fetch').disabled = false; }
     };
     $('#imp-fetch').addEventListener('click', go);
