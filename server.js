@@ -80,7 +80,7 @@ async function aiParse({ text, html, url }){
     source = `Recipe text pasted by the user:\n${String(text).slice(0, 24000)}`;
   }
   const prompt = `Extract the recipe from the source material below into JSON. Respond with ONLY a JSON object — no markdown fences, no commentary. Use exactly these keys:
-{"title": string, "description": string (1-2 sentences, empty string if none), "prep_min": integer|null, "cook_min": integer|null, "total_min": integer|null, "servings": integer (default 4), "cuisine": string|null, "tags": string[] (up to 5 short tags like "Vegetarian","Weeknight"), "image_url": string|null (absolute URL only), "ingredients": string[] (one complete ingredient per entry, keep quantities and prep notes, e.g. "2 lb zucchini, coarsely grated"), "steps": string[] (one instruction per entry, in order, imperative voice, no step numbers)}
+{"title": string, "description": string (1-2 sentences, empty string if none), "prep_min": integer|null, "cook_min": integer|null, "total_min": integer|null, "servings": integer (default 4), "cuisine": string|null, "author": string|null (the recipe's credited author or site/creator name), "tags": string[] (up to 5 short tags like "Vegetarian","Weeknight"), "image_url": string|null (absolute URL only), "ingredients": string[] (one complete ingredient per entry, keep quantities and prep notes, e.g. "2 lb zucchini, coarsely grated"), "steps": string[] (one instruction per entry, in order, imperative voice, no step numbers)}
 Rules: preserve the recipe's own wording where possible; do not invent quantities or steps that are not in the source; merge duplicate ingredient lists (some pages repeat them); if the source clearly contains no recipe, return {"error":"no recipe found"}.
 ${url ? `Source URL: ${url}\n` : ''}
 SOURCE MATERIAL:
@@ -108,6 +108,28 @@ const server = http.createServer(async (req, res) => {
 
   /* ── API ── */
   if (u.pathname === '/api/health') return json(res, 200, { ok:true, ai: !!AI_KEY });
+
+  /* Stream an external image so the client can cache it into its own storage. */
+  if (u.pathname === '/api/image' && req.method === 'GET'){
+    const target = u.searchParams.get('url') || '';
+    if (!/^https?:\/\//i.test(target)) return json(res, 400, { error:'A full http(s) URL is required' });
+    try {
+      let r = null;
+      for (const prof of FETCH_PROFILES){
+        try {
+          r = await fetch(target, { headers: { ...prof.headers, 'Accept':'image/avif,image/webp,image/*,*/*;q=0.8' }, redirect:'follow', signal: AbortSignal.timeout(12000) });
+          if (r.ok) break;
+        } catch { r = null; }
+      }
+      if (!r || !r.ok) return json(res, 502, { error:'Could not fetch that image' });
+      const ct = r.headers.get('content-type') || 'image/jpeg';
+      if (!ct.startsWith('image/')) return json(res, 415, { error:'Not an image' });
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.length > 8_000_000) return json(res, 413, { error:'Image too large' });
+      res.writeHead(200, { 'Content-Type': ct, 'Cache-Control':'no-store' });
+      return res.end(buf);
+    } catch { return json(res, 502, { error:'Could not fetch that image' }); }
+  }
 
   if (u.pathname === '/api/fetch' && req.method === 'GET'){
     const target = u.searchParams.get('url') || '';
