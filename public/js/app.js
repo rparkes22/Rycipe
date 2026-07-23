@@ -167,32 +167,72 @@ function recipeFromHtml(html, url){
   }
   return null;
 }
+let AI_ON = false;
+async function checkAI(){
+  try { const r = await fetch('/api/health', { signal: AbortSignal.timeout(4000) }); AI_ON = (await r.json()).ai === true; }
+  catch { AI_ON = false; }
+}
+function normalizeAIRecipe(p, url){
+  let sourceName = '';
+  try { if (url) sourceName = new URL(url).hostname.replace(/^www\./,''); } catch {}
+  return {
+    title: p.title || 'Untitled recipe', description: p.description || '',
+    image_url: p.image_url || null, source_url: url || null, source_name: sourceName || null,
+    prep_min: p.prep_min || null, cook_min: p.cook_min || null, total_min: p.total_min || null,
+    servings: p.servings || 4, cuisine: p.cuisine || null,
+    tags: (p.tags || []).slice(0,5),
+    ingredients: (p.ingredients || []).map(String).filter(Boolean),
+    steps: (p.steps || []).map(String).filter(Boolean),
+  };
+}
+async function aiParseRemote(body, url){
+  const r = await fetch('/api/parse', {
+    method:'POST', headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(70000) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || 'Parse failed');
+  return normalizeAIRecipe(data.recipe, url);
+}
 async function fetchRecipeFromUrl(url, onStatus){
-  // Public CORS proxies come and go, and big recipe publishers block some of
-  // them — so try several routes and take the first that yields recipe data.
   const enc = encodeURIComponent(url);
+  // 1) Our own server fetches the page — no CORS, real browser headers.
+  let serverHtml = null;
+  onStatus?.('Fetching the page…');
+  try {
+    const res = await fetch('/api/fetch?url=' + enc, { signal: AbortSignal.timeout(20000) });
+    if (res.ok){
+      serverHtml = await res.text();
+      const rec = recipeFromHtml(serverHtml, url);
+      if (rec) return rec;
+    }
+  } catch {}
+  // 2) Public proxies, in case the site blocks our server's address.
   const routes = [
-    ['corsproxy.io',      `https://corsproxy.io/?url=${enc}`],
-    ['allorigins',        `https://api.allorigins.win/raw?url=${enc}`],
-    ['codetabs',          `https://api.codetabs.com/v1/proxy?quest=${url}`],
+    ['corsproxy.io', `https://corsproxy.io/?url=${enc}`],
+    ['allorigins',   `https://api.allorigins.win/raw?url=${enc}`],
     ['the Internet Archive', `https://web.archive.org/web/2id_/${url}`],
   ];
-  let sawHtml = false;
+  let bestHtml = serverHtml;
   for (const [name, prox] of routes){
-    onStatus?.(`Fetching via ${name}…`);
+    onStatus?.(`Trying another route (${name})…`);
     try {
-      const res = await fetch(prox, { signal: AbortSignal.timeout(14000) });
+      const res = await fetch(prox, { signal: AbortSignal.timeout(12000) });
       if (!res.ok) continue;
       const html = await res.text();
       if (!html || html.length < 500) continue;
-      sawHtml = true;
       const rec = recipeFromHtml(html, url);
       if (rec) return rec;
+      if (!bestHtml || html.length > bestHtml.length) bestHtml = html;
     } catch {}
   }
-  throw new Error(sawHtml
-    ? 'That page loaded, but no structured recipe data was found on it'
-    : 'Could not reach that page from the browser — the site may block proxies');
+  // 3) We reached the page but it publishes no structured data — let AI read it.
+  if (bestHtml && AI_ON){
+    onStatus?.('No structured data — reading the page with AI…');
+    return await aiParseRemote({ html: bestHtml, url }, url);
+  }
+  throw new Error(bestHtml
+    ? 'That page has no structured recipe data'
+    : 'Could not reach that page — the site may block automated readers');
 }
 function parsePastedText(text){
   const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
@@ -877,9 +917,16 @@ function drawImportPane(){
       <div class="field"><label for="imp-text">Recipe text</label>
         <textarea class="input" id="imp-text" rows="10" placeholder="Title on the first line, then ingredients and steps — headings like “Ingredients” and “Method” help, but aren't required."></textarea></div>
       <button class="btn btn-primary" id="imp-parse">Parse it</button>`;
-    $('#imp-parse').addEventListener('click', ()=>{
+    $('#imp-parse').addEventListener('click', async ()=>{
       const t = $('#imp-text').value; if (!t.trim()) return;
-      importDraft = parsePastedText(t); drawImportPane();
+      if (AI_ON){
+        const btn = $('#imp-parse'); btn.disabled = true; btn.textContent = 'Reading it…';
+        try { importDraft = await aiParseRemote({ text: t }); }
+        catch { importDraft = parsePastedText(t); toast('AI parse hiccuped — used the quick parser instead'); }
+      } else {
+        importDraft = parsePastedText(t);
+      }
+      drawImportPane();
     });
   } else {
     importDraft = { title:'', description:'', ingredients:[''], steps:[''], servings:4, tags:[] };
@@ -1212,6 +1259,7 @@ async function openNotes(r){
 
 /* ═════════ boot ═════════ */
 async function boot(){
+  checkAI();
   const { data:{ session } } = await db.auth.getSession();
   S.user = session?.user || null;
   S.loaded = false;

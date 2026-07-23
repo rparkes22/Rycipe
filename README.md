@@ -6,7 +6,20 @@ A recipe manager with import, cookbooks, meal planning, a store-ready shopping l
 
 - **Frontend** — static vanilla-JS SPA (`public/`), no build step
 - **Backend** — Supabase (project `msg-recipe-app`, id `beujonpfcwdazmtecmts`): Postgres + Row Level Security, email/password auth, `recipe-photos` storage bucket
-- **Hosting** — Fly.io, nginx serving the static files
+- **Hosting** — Fly.io; a small zero-dependency Node server (`server.js`) serves the static app and provides `/api/fetch` (server-side page fetching, no CORS) and `/api/parse` (optional AI recipe extraction)
+
+## Optional: AI-powered import (recommended)
+
+The server has an AI parsing endpoint that dramatically improves import quality — it reads pages that publish no structured recipe data, and turns messy pasted text into an accurate, structured recipe. It uses the Anthropic API (Claude Haiku — fast and costs a fraction of a cent per recipe) with your own key:
+
+1. Get an API key at https://platform.claude.com (Settings → API keys)
+2. Add it to your Fly app as a secret (never commit it to code):
+
+```bash
+fly secrets set ANTHROPIC_API_KEY=sk-ant-your-key-here
+```
+
+Fly restarts the app automatically. Without the key everything still works — imports just fall back to structured-data-only parsing and the quick text parser.
 
 ## Deploy to Fly.io
 
@@ -18,7 +31,7 @@ fly launch --no-deploy   # accept the existing fly.toml; pick a unique app name 
 fly deploy
 ```
 
-That's it — `fly deploy` builds the Dockerfile (nginx + the `public/` folder) and ships it. The app is fully static; Supabase is called directly from the browser, so there are no server secrets. The publishable key in `js/app.js` is safe to expose — data access is enforced by Row Level Security.
+That's it — `fly deploy` builds the Dockerfile (Node + `server.js` + the `public/` folder) and ships it. The app is fully static; Supabase is called directly from the browser, so there are no server secrets. The publishable key in `js/app.js` is safe to expose — data access is enforced by Row Level Security.
 
 If you rename the app during `fly launch`, that's fine; nothing in the code depends on the hostname.
 
@@ -44,13 +57,15 @@ If you rename the app during `fly launch`, that's fine; nothing in the code depe
 
 ## Notes & limits
 
-- URL import depends on the recipe site publishing JSON-LD recipe data (most major sites do) and on the public `api.allorigins.win` CORS proxy. If a fetch fails, paste-and-parse is the fallback.
+- URL import tries, in order: our own server fetch (multiple request profiles), public CORS proxies, the Internet Archive, and finally AI extraction of the raw page. A handful of publishers block all automated readers; paste-and-parse (AI-assisted when the key is set) covers those.
 - Multi-day "month" planner view, photo-OCR import, and household/shared accounts are natural next steps.
 
 ## Local development
 
 ```bash
-cd public && python3 -m http.server 8080
+node server.js            # http://localhost:8080
+# with AI parsing:
+ANTHROPIC_API_KEY=sk-ant-… node server.js
 ```
 
-Then open http://localhost:8080 — no build step needed.
+No dependencies to install — the server is plain Node 18+.
